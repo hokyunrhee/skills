@@ -1,0 +1,25 @@
+{
+  "name": "hokyunrhee-skills",
+  "owner": {
+    "name": "Hokyun Rhee",
+    "url": "https://github.com/hokyunrhee"
+  },
+  "metadata": {
+    "description": "A collection of Claude Code skills by Hokyun Rhee",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "omakase-rails",
+      "description": "Rails omakase conventions as composable Claude Code skills.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Hokyun Rhee",
+        "url": "https://github.com/hokyunrhee"
+      },
+      "homepage": "https://github.com/hokyunrhee/skills",
+      "tags": ["rails", "ruby", "pundit", "authorization"],
+      "source": "./omakase-rails"
+    }
+  ]
+}
