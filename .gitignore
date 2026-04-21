@@ -11,3 +11,6 @@
 # Backups / temp
 *.bak
 *.tmp
+
+evals/
+*-workspace/

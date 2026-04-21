@@ -16,8 +16,9 @@ Pundit is a thin wrapper around Ruby classes named `<Model>Policy`. Every policy
 | namespaced policy (admin)                                  | `authorize [:admin, @record]` / `policy_scope([:admin, Scope])`                               |
 | Controller without a model (dashboard, report)             | `authorize :dashboard, :show?`                                                                |
 | Role-based permitted attributes                            | `permitted_attributes_for_<action>` in policy + `permitted_attributes(@record)` in controller |
+| Permission checks in views or serialized props             | `policy(@record).update?`                                                                     |
 | Legitimate skip (public endpoint, webhook, health check)   | `skip_authorization` / `skip_policy_scope` inside the action                                  |
-| Authorization outside a controller (job, service, console) | `Pundit.authorize(user, record, :query?)` with strict variant                                 |
+| Authorization outside a controller (job, service, console) | `Pundit.authorize(user, record, :query?)`                                                     |
 
 ## Setup
 
@@ -69,7 +70,7 @@ class ApplicationController < ActionController::Base
 end
 ```
 
-If the handler grows conditionals beyond format branching, the logic belongs elsewhere (a policy predicate, a role check, a feature flag), not in the handler.
+For JSON APIs, replace the redirect with a `render json: {...}, status: :forbidden` call. For mixed codebases, branch on `request.format` inside the handler. If the handler grows conditionals beyond that, the logic belongs elsewhere (a policy predicate, a role check, a feature flag), not in the handler.
 
 ### Consolidated verify callback
 
@@ -225,6 +226,28 @@ end
 
 Inheriting from `ApplicationPolicy` is optional; the default-deny baseline is the usual reason to do it.
 
+### Permission checks in views or serialized props
+
+**When:** rendering UI conditionally, or serializing capability flags into response data (Inertia props, JSON:API meta, React/Vue frontends) — anywhere a view-layer or client-side decision must mirror a policy predicate.
+
+**[Low freedom]** Use the `policy(record)` helper in the view or controller. It resolves to the same `<Model>Policy` class `authorize` uses, so predicate answers stay consistent with the controller's enforcement:
+
+```erb
+<% if policy(@post).update? %>
+  <%= link_to "Edit", edit_post_path(@post) %>
+<% end %>
+```
+
+For frontend stacks that serialize capability flags (Inertia props, JSON:API meta, etc.), hoist the policy into a local and serialize predicate answers into the payload — rather than re-deriving permissions from role checks on the client:
+
+```ruby
+policy = policy(@post)
+render inertia: "Posts/Show", props: {
+  post: @post,
+  can: { edit: policy.update?, destroy: policy.destroy? }
+}
+```
+
 ### Role-based strong parameters
 
 **When:** different roles should submit different subsets of attributes for the same action.
@@ -252,40 +275,6 @@ end
 
 `permitted_attributes(@article)` resolves to `pundit_params_for(@article).permit(*policy.permitted_attributes_for_<action>)`, falling back to `policy.permitted_attributes` when the per-action method is not defined. Strong parameters are not bypassed — the policy just defines the allowlist; the final `permit` still runs.
 
-**Upcoming (Pundit 2.6.0, unreleased as of 2026-04):** a newer form uses `expected_attributes_for_action(action_name)` on the policy plus the `expected_attributes(record)` controller helper, which internally wraps Rails 8's `params.expect`. Use it once 2.6.0 ships; on Pundit ≤ 2.5 calling `expected_attributes` raises `NoMethodError`.
-
-### Testing policies
-
-**When:** you have policy logic worth regression-testing. Applies in parallel with every other pattern — testing is not a "later" step.
-
-**[High freedom]** Policies are plain Ruby classes — construct them and call the predicate:
-
-```ruby
-# Minitest
-require "test_helper"
-
-class PostPolicyTest < ActiveSupport::TestCase
-  def test_admin_can_create
-    policy = PostPolicy.new(users(:admin), Post.new)
-    assert policy.create?
-  end
-
-  def test_guest_cannot_destroy_published
-    post = Post.new(published: true)
-    policy = PostPolicy.new(users(:guest), post)
-    refute policy.destroy?
-  end
-
-  def test_scope_excludes_unpublished_for_guest
-    resolved = PostPolicy::Scope.new(users(:guest), Post).resolve
-    assert_includes resolved, posts(:published)
-    refute_includes resolved, posts(:draft)
-  end
-end
-```
-
-Policy tests are the fastest feedback loop on authorization logic. Controller tests exercise the wiring, not the policy rules.
-
 ### Pundit outside controllers
 
 **When:** authorizing inside a background job, service object, model callback, or console script — anywhere `current_user` is not in scope.
@@ -301,14 +290,19 @@ Pundit.policy_scope(user, Post)     # returns a scope or nil
 Pundit.policy_scope!(user, Post)    # raises if PostPolicy::Scope missing
 ```
 
-Prefer `Pundit.authorize` / `Pundit.policy_scope!` for the strict variants in non-controller code so missing policies fail loudly rather than silently nil-returning.
+In non-controller code, prefer the bang variants so missing policies fail loudly rather than silently returning `nil`.
 
 ## Gotchas
 
 - **`ApplicationPolicy` defaults must stay `false`.** If a predicate returns `true` by default, a newly-generated policy with no overrides silently authorizes everything. The generator's default-deny posture is a load-bearing security invariant.
-- **`verify_authorized` is a reminder, not a security gate.** It raises on controller actions that _forgot_ to call `authorize`; it does not raise when `authorize` returned `false` — that is a separate `Pundit::NotAuthorizedError`. Do not confuse the two.
-- **`policy_scope` and `authorize` are not interchangeable.** Use `policy_scope(Post)` for collection queries (`index`); use `authorize @post` for single-record access. Scoping a single record with `policy_scope` defeats the check; calling `authorize` on a raw collection does nothing useful.
-- **`pundit_user` override.** By default, Pundit looks up `current_user`. Apps that use a different helper (`Current.user`, the Rails 8 native auth generator's `Current.session.user`) must override `pundit_user` in `ApplicationController`:
+
+- **`ApplicationPolicy::Scope#resolve` raises by default.** The generator writes `raise NoMethodError, "You must define #resolve in #{self.class}"` into the base class. Every concrete policy's `Scope` must override it — forgetting crashes the `index` action at request time, not at boot. No silent fallback to `scope.all`.
+
+- **`authorize(nil)` looks up `NilClassPolicy`.** If `Post.find_by(...)` returns `nil` and the code keeps going into `authorize @post`, Pundit resolves a class literally named `NilClassPolicy`. This is almost always a bug masking a missing-record branch — use `find` (which raises `RecordNotFound`), or handle the nil case before `authorize`. Pundit's own `NilClassPolicy` support exists for null-object patterns, not as a silent fallback for missing records.
+
+- **`verify_authorized` is a reminder, not a security gate.** It raises on controller actions that _forgot_ to call `authorize`; it does not raise when `authorize` returned `false` — that is a separate `Pundit::NotAuthorizedError`. The security check itself is `authorize`; `verify_authorized` just catches omissions.
+
+- **`pundit_user` override.** By default, Pundit looks up `current_user`. Rails 8's `bin/rails generate authentication` exposes the logged-in user as `Current.user` instead, so apps using that generator — or any non-Devise auth scheme — must override `pundit_user` in `ApplicationController`:
 
 ```ruby
 def pundit_user
@@ -316,18 +310,11 @@ def pundit_user
 end
 ```
 
-- **Helpers, each with a different job. Do not confuse them.**
-  - `permitted_attributes(record)` — current stable helper. Returns the permitted params Hash via `pundit_params_for(record).permit(*policy.permitted_attributes_for_<action>)`, with fallback to `policy.permitted_attributes`.
-  - `expected_attributes(record)` — Pundit 2.6.0+ (unreleased as of 2026-04), not on 2.5.x. Same idea but wraps Rails 8's `params.expect` instead of `params.require(...).permit(...)`.
-  - `pundit_params_for(record)` — **raw params extractor only**, not an attribute resolver. Source: `params.require(pundit_param_key(record))`. Override it to change the params shape (JSON:API, nested keys, etc.). Do not splat its return value into `permit(*)` — it returns `ActionController::Parameters`, not an Array.
-
 - **Four Pundit errors, four meanings.** Distinguish them when debugging and when writing `rescue_from` handlers:
-  - `Pundit::NotAuthorizedError` — `authorize` was called and the policy predicate returned `false`. Handle with a flash + redirect.
-  - `Pundit::AuthorizationNotPerformedError` — `verify_authorized` fired because the action did not call `authorize`. Handle by calling `authorize` or `skip_authorization`.
-  - `Pundit::PolicyScopingNotPerformedError` (subclass of `AuthorizationNotPerformedError`) — `verify_policy_scoped` fired on an `index`-style action that did not call `policy_scope`. Handle by calling `policy_scope` or `skip_policy_scope`.
+  - `Pundit::NotAuthorizedError` — `authorize` was called and the policy predicate returned `false`.
+  - `Pundit::AuthorizationNotPerformedError` — `verify_authorized` fired because the action did not call `authorize`. Fix by calling `authorize` or `skip_authorization`.
+  - `Pundit::PolicyScopingNotPerformedError` (subclass of `AuthorizationNotPerformedError`) — `verify_policy_scoped` fired on an `index`-style action that did not call `policy_scope`. Fix by calling `policy_scope` or `skip_policy_scope`.
   - `Pundit::NotDefinedError` — policy or scope class does not exist for the given record. Usually means a missing `<Model>Policy` file or a typo in `authorize([:admin, record])` namespacing. Fix by creating the policy; do not rescue silently.
-
-- **`pundit_reset!` for user switching.** After login, logout, or impersonation inside the same request cycle, call `pundit_reset!` to clear Pundit's memoized user so subsequent `authorize` / `policy_scope` calls use the new user. Rarely needed in normal request flow.
 
 ## When to leave this skill
 
