@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "A collection of Claude Code skills by Hokyun Rhee",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "omakase-rails",
       "description": "Rails omakase conventions as composable Claude Code skills.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "author": {
         "name": "Hokyun Rhee",
         "url": "https://github.com/hokyunrhee"
