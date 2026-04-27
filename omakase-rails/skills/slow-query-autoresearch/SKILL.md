@@ -28,7 +28,7 @@ Roles: agent **proposes** and **applies**, harness **measures**, rule **decides*
 
 ## Out-of-scope
 
-Four classes of change are out of scope. Two are mechanically rejected by `scripts/pre-commit-hook.sh` because mis-applying them silently corrupts measurements or breaks the revert path before review catches it. The other two are out of scope by convention — agent self-enforces from this table; PR review at squash/cherry-pick catches the rare miss.
+Four classes are out of scope. Two are hook-enforced because mis-applying them silently corrupts measurements or breaks revert; two are convention-only — agent self-enforces from this table, PR review catches misses.
 
 | Class | Examples | Why out | Enforced by |
 |---|---|---|---|
@@ -46,7 +46,7 @@ User: *"DashboardController#show takes 1.2s, ActiveRecord 400ms"*.
 1. **Narrow lambda.** Agent extracts `current_user.posts.recent.limit(50)` followed by `.map { |p| [p.id, p.title, p.comments.count] }` (the view's effective traversal). Inputs pinned: `INPUTS = { user_id: 42, page_size: 50 }`. Output contract: array of `[id, title, count]` triples — strict default fingerprint.
 2. **iter 0 baseline.** median 1247ms, p99 1380ms, queries=51 (1 + 50 N+1). Commit with `Fixture-SHA`, `Median-Us: 1247000`, full pre-flight body.
 3. **iter 1 propose.** EXPLAIN: 50 repeated `SELECT COUNT(*) FROM comments WHERE post_id = $1`. → eager loading direction. Candidate uses `.includes(:comments)` + `.size` (Ruby-side count off the preloaded association). Bench: median 23ms, p99 28ms, queries=2. Gates A ✓ B ✓ (-98%) C ✓ → KEEP.
-4. **iter 2 propose.** Now db_us 18ms ≈ median 23ms — Ruby-bound on Active Record object hydration. Try `.left_joins(:comments).group('posts.id').select('posts.id, posts.title, COUNT(comments.id) AS c')` followed by `.map { |r| [r.id, r.title, r.c.to_i] }` — composite single SQL with the same triple projection that the baseline lambda already produces. Each candidate keeps the consumer-side projection unchanged; only the SQL underneath moves. That's what keeps Gate A (fingerprint) green across SQL-shape changes. Bench: median 11ms, p99 14ms. Gate A ✓ B ✓ (-52%) C ✓ → KEEP.
+4. **iter 2 propose.** db_us 18ms ≈ median 23ms — now Ruby-bound on Active Record object hydration. Try composite SQL: `.left_joins(:comments).group('posts.id').select('posts.id, posts.title, COUNT(comments.id) AS c')` then `.map { |r| [r.id, r.title, r.c.to_i] }`. Same triple projection as baseline — Gate A stays green across SQL-shape changes. Bench: median 11ms, p99 14ms. Gates ✓ → KEEP.
 5. **iter 3-5.** Try multi-column index, partial index variants, `find_by_sql`. All revert (gate B: improvements within noise after iter 2). T2 plateau fires.
 6. **Handoff.** Termination report shows last-3-reverts on gate B. Cherry-pick iter 1, iter 2 to main. Out-of-scope hint: counter_cache for further reduction (separate PR; column add + backfill is data migration, not in autoresearch scope).
 
@@ -70,6 +70,8 @@ The fourth precondition — single deterministic call site — is established in
 
 From user trigger. If ambiguous, ask once: *"Narrow the slow path to a single deterministic callable — e.g. `Order.where(status:'pending').recent.limit(100).to_a`."* Pin all run-to-run varying inputs (user_id, dates, random seeds).
 
+If the call site is a view (ERB, helper invoked from a view), flag it: views read multiple attributes per iterated object, so the lambda in 1.4 must capture the consumer's full projection — not just the slow expression.
+
 ### 1.2 Detect environment, surface as facts
 
 ```bash
@@ -83,7 +85,13 @@ Try convention map (`app/models/foo.rb` → `test/models/foo_test.rb` or `spec/m
 
 ### 1.4 Output contract
 
-Default `FINGERPRINT` is strict — `SHA1(result.inspect)`. Override only if user surfaces relaxed semantics (consumer iterates as Set, Active Record vs Hash both fine, etc.). Override needs explicit user confirmation and is encoded once in `<target>.fixture.rb`. To change contract after iter-0: new scratch branch.
+The lambda's return is the contract — fingerprint hashes its bytes, and anything not in the return drifts outside fingerprint. Pick the return to mirror what the production consumer reads, not just the slow expression. A lambda capturing one scalar can match across iters while object shape, attributes, or scope semantics silently change underneath.
+
+- **Model/controller/job consumer**: return whatever the consumer projects. If it does `.map { |o| [o.id, o.total] }`, return that.
+- **View consumer**: read the view (and rendered partials); return one tuple per iterated object covering every attribute the view reads. E.g., `_column.html.erb` uses `column.id`, `column.name`, `column.cards.active.count`, and `column.leftmost?` for a cache key → return `[[c.id, c.name, c.position, c.cards.active.count], ...]`. The richer tuple catches candidates that change *how* objects are loaded (virtual attributes, partial select, alternate relation), not just *how* the slow value is computed.
+- **API/JSON consumer**: return the serialized shape (`as_json`, jbuilder output, equivalent hash).
+
+Default `FINGERPRINT` is strict — `SHA1(result.inspect)`. Override only if the user surfaces relaxed semantics (Set vs Array, Active Record vs Hash). Override needs explicit user confirmation, is encoded in `<target>.fixture.rb`, and changing it after iter-0 requires a new scratch branch.
 
 ### 1.5 Scratch branch + hook install
 
@@ -98,7 +106,7 @@ cp <skill_dir>/scripts/pre-commit-hook.sh "$HOOKS_PATH/pre-commit"
 chmod +x "$HOOKS_PATH/pre-commit"
 ```
 
-The hook enforces three hard rules at commit time: fixture lock after iter-0, index-only migrations, no new cache/queue content in `app/` or `lib/` diffs. Out-of-scope changes it does *not* catch (Gemfile, `config/`, `app/jobs/`) rely on the Out-of-scope table plus PR review — the hook stays narrow so its false-positive surface stays small. Do not bypass with `--no-verify`: it's the only mechanical guard on contract/revertibility/metric integrity. If a check blocks a legitimate commit, fix the hook (or start a new branch if the contract was wrong) — don't skip.
+The hook enforces three rules at commit time: fixture lock after iter-0, index-only migrations, no new cache/queue content in `app/`/`lib/`. It stays narrow on purpose — other out-of-scope categories rely on the table plus PR review. Don't bypass with `--no-verify`; if a check blocks a legitimate commit, fix the hook or start a new branch.
 
 ### 1.6 Templates
 
@@ -174,10 +182,21 @@ EXPLAIN reading hints (prior, not constraint — agent may propose anything not 
 | `Hash Aggregate`, many groups, per-group top-N | window function — `ROW_NUMBER` / `DISTINCT ON` / LATERAL |
 | `median_us >> db_us` after column projection tried | hydration bypass — `find_by_sql` / `exec_query` (custom fingerprint required for Active Record-vs-Hash transition) |
 
+**Scope duplication caution.** Prefer composing existing Ruby scopes (`Model.scope_name.where(...).group(...)`) over inlining their conditions as raw SQL. Duplication creates a forking definition: equivalent today, drift-prone once the canonical scope changes, and fixture-locked fingerprint won't notice. If raw SQL is unavoidable (LATERAL, JOIN-clause filtering, recursive CTE), name the scope being reproduced in the commit body so review can flag it.
+
 ## Steps 3-5 — Iterate
 
 ### Step 3: Propose
 Pick the highest-leverage direction from EXPLAIN. **One hypothesis per iteration.** Bundling two changes hides which one moved the number and turns a revert into an unraveling.
+
+**Outside-fingerprint articulation.** Before commit, list what this candidate changes that fingerprint won't see — written in the iter commit body alongside the implementation summary. Four common axes:
+
+- **Object shape** — added/removed Active Record attributes (e.g., a virtual attribute from `select("..., COUNT(...) AS x")`), columns dropped from `select`, eager-loaded associations.
+- **Scope duplication** — Ruby scope's conditions reproduced inline as raw SQL (see Step 2 caution).
+- **Side effects** — `touch` callbacks, partial cache key derivation, query cache interaction.
+- **Adapter-specific SQL** — Postgres strict `GROUP BY` vs MySQL/SQLite lax, NULLS handling, planner sensitivity.
+
+For each, state why it's safe or what review handles it. "None" is a valid answer — say so explicitly. Cherry-pick/squash review depends on this list.
 
 ### Step 4: Apply
 Edit production code. Add candidate as a new entry in `CANDIDATES` with descriptive name (`candidate_2_partial_index_pending`, not `candidate_2_try`).
@@ -301,7 +320,7 @@ To consume autoresearch/<target>:
 
 ### Hook teardown
 
-After the consumption decision is made (cherry-pick, squash, or discard), remove the hook so the repository returns to its pre-session state. The hook is a no-op outside `autoresearch/*` branches so leaving it installed is not actively harmful, but a stale hook from a previous session can confuse a later one — especially if `core.hooksPath` was customized or a different skill version installs a different hook later.
+After consumption (cherry-pick/squash/discard), remove the hook to return the repository to its pre-session state. It's a no-op outside `autoresearch/*` branches, but a stale hook from a previous session can confuse a later one if a different skill version is installed.
 
 ```bash
 HOOKS_PATH=$(git config core.hooksPath || echo ".git/hooks")
