@@ -43,7 +43,7 @@ Common manual recipes (delivered at T2 plateau if EXPLAIN points there): counter
 
 User: *"DashboardController#show takes 1.2s, ActiveRecord 400ms"*.
 
-1. **Narrow lambda.** Agent extracts `current_user.posts.recent.limit(50)` followed by `.map { |p| [p.id, p.title, p.comments.count] }` (the view's effective traversal). Inputs pinned: `INPUTS = { user_id: 42, page_size: 50 }`. Output contract: array of `[id, title, count]` triples — strict default fingerprint.
+1. **Narrow lambda.** Agent extracts `current_user.posts.recent.limit(50)` followed by `.map { |p| [p.id, p.title, p.comments.count] }` — the consumer's projection. Inputs pinned: `INPUTS = { user_id: 42, page_size: 50 }`. Output contract: array of `[id, title, count]` triples — strict default fingerprint.
 2. **iter 0 baseline.** median 1247ms, p99 1380ms, queries=51 (1 + 50 N+1). Commit with `Fixture-SHA`, `Median-Us: 1247000`, full pre-flight body.
 3. **iter 1 propose.** EXPLAIN: 50 repeated `SELECT COUNT(*) FROM comments WHERE post_id = $1`. → eager loading direction. Candidate uses `.includes(:comments)` + `.size` (Ruby-side count off the preloaded association). Bench: median 23ms, p99 28ms, queries=2. Gates A ✓ B ✓ (-98%) C ✓ → KEEP.
 4. **iter 2 propose.** db_us 18ms ≈ median 23ms — now Ruby-bound on Active Record object hydration. Try composite SQL: `.left_joins(:comments).group('posts.id').select('posts.id, posts.title, COUNT(comments.id) AS c')` then `.map { |r| [r.id, r.title, r.c.to_i] }`. Same triple projection as baseline — Gate A stays green across SQL-shape changes. Bench: median 11ms, p99 14ms. Gates ✓ → KEEP.
@@ -70,8 +70,6 @@ The fourth precondition — single deterministic call site — is established in
 
 From user trigger. If ambiguous, ask once: *"Narrow the slow path to a single deterministic callable — e.g. `Order.where(status:'pending').recent.limit(100).to_a`."* Pin all run-to-run varying inputs (user_id, dates, random seeds).
 
-If the call site is a view (ERB, helper invoked from a view), flag it: views read multiple attributes per iterated object, so the lambda in 1.4 must capture the consumer's full projection — not just the slow expression.
-
 ### 1.2 Detect environment, surface as facts
 
 ```bash
@@ -87,9 +85,8 @@ Try convention map (`app/models/foo.rb` → `test/models/foo_test.rb` or `spec/m
 
 The lambda's return is the contract — fingerprint hashes its bytes, and anything not in the return drifts outside fingerprint. Pick the return to mirror what the production consumer reads, not just the slow expression. A lambda capturing one scalar can match across iters while object shape, attributes, or scope semantics silently change underneath.
 
-- **Model/controller/job consumer**: return whatever the consumer projects. If it does `.map { |o| [o.id, o.total] }`, return that.
-- **View consumer**: read the view (and rendered partials); return one tuple per iterated object covering every attribute the view reads. E.g., `_column.html.erb` uses `column.id`, `column.name`, `column.cards.active.count`, and `column.leftmost?` for a cache key → return `[[c.id, c.name, c.position, c.cards.active.count], ...]`. The richer tuple catches candidates that change *how* objects are loaded (virtual attributes, partial select, alternate relation), not just *how* the slow value is computed.
-- **API/JSON consumer**: return the serialized shape (`as_json`, jbuilder output, equivalent hash).
+- **Clean callable consumer** (model method, controller assignment, job, decorator): return whatever the consumer projects. If it does `.map { |o| [o.id, o.total] }`, return that.
+- **API/JSON consumer**: return the serialized shape (`as_json`, jbuilder output, Inertia props hash, equivalent hash).
 
 Default `FINGERPRINT` is strict — `SHA1(result.inspect)`. Override only if the user surfaces relaxed semantics (Set vs Array, Active Record vs Hash). Override needs explicit user confirmation, is encoded in `<target>.fixture.rb`, and changing it after iter-0 requires a new scratch branch.
 
@@ -193,7 +190,7 @@ Pick the highest-leverage direction from EXPLAIN. **One hypothesis per iteration
 
 - **Object shape** — added/removed Active Record attributes (e.g., a virtual attribute from `select("..., COUNT(...) AS x")`), columns dropped from `select`, eager-loaded associations.
 - **Scope duplication** — Ruby scope's conditions reproduced inline as raw SQL (see Step 2 caution).
-- **Side effects** — `touch` callbacks, partial cache key derivation, query cache interaction.
+- **Side effects** — `touch` callbacks, cache key derivation, query cache interaction.
 - **Adapter-specific SQL** — Postgres strict `GROUP BY` vs MySQL/SQLite lax, NULLS handling, planner sensitivity.
 
 For each, state why it's safe or what review handles it. "None" is a valid answer — say so explicitly. Cherry-pick/squash review depends on this list.
