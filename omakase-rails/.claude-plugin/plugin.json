@@ -1,6 +1,6 @@
 {
   "name": "omakase-rails",
-  "version": "0.2.2",
+  "version": "0.2.1",
   "description": "Rails omakase conventions as composable Claude Code skills.",
   "author": {
     "name": "Hokyun Rhee",
