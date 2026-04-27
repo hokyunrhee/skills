@@ -13,10 +13,10 @@ From GitHub:
 
 ## What's inside
 
-| Skill                     | Triggers on                                                                                                                        |
+| Skill                     | Summary                                                                                                                            |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `pundit-authorization`    | Pundit policy classes, verify\_\* callbacks, permitted_attributes — triggers ONLY when Gemfile has `gem 'pundit'`                  |
-| `slow-query-autoresearch` | Slow Rails queries / N+1 / EXPLAIN — runs an autonomous propose-bench-gate loop on a scratch branch, keeping each iter that beats the prior best by ≥5%, until plateau. Silent when not in a Rails app, DB unreachable, or no tests. |
+| `pundit-authorization`    | Pundit policy classes, `authorize`/`policy_scope`/`verify_*`, `permitted_attributes` for role-based strong params. Silent when Gemfile lacks `gem 'pundit'`. |
+| `slow-query-autoresearch` | Autonomous propose-bench-gate loop for faster ActiveRecord queries with identical output. Scope: query rewrites + index-only migrations. Silent when not in a Rails app, DB unreachable, no tests, or the slow path can't be narrowed to a deterministic callable. |
 
 ## License
 
