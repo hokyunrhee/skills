@@ -1,6 +1,6 @@
 ---
 name: slow-query-autoresearch
-description: Autonomous loop searching for faster ActiveRecord queries with identical output — fingerprint + timing-past-noise + tests gate each iter mechanically. Scope: query rewrites + index-only migrations only (no cache, gems, config, data migrations). Silent when not a Rails app, DB unreachable, no tests, or the slow path can't be narrowed to a deterministic callable. Make sure to use whenever the user mentions a slow query/scope/job, EXPLAIN output, N+1 patterns, or asks to "make this faster", "optimize this query", "speed up this page" — even when only describing slowness rather than asking for a fix.
+description: Autonomous loop searching for faster ActiveRecord queries with identical output — fingerprint + timing-past-noise + tests gate each iter mechanically. Scope — query rewrites + index-only migrations only (no cache, gems, config, data migrations). Silent when not a Rails app, DB unreachable, no tests, or the slow path can't be narrowed to a deterministic callable. Make sure to use whenever the user mentions a slow query/scope/job, EXPLAIN output, N+1 patterns, or asks to "make this faster", "optimize this query", "speed up this page" — even when only describing slowness rather than asking for a fix.
 ---
 
 ## Philosophy
