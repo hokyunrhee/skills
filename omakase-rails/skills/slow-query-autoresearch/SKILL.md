@@ -299,6 +299,31 @@ To consume autoresearch/<target>:
    git branch -D autoresearch/<target>
 ```
 
+### Termination diagnostic — where the next round could aim
+
+Append after the consumption block. The skill stays strict during the loop on purpose; this section names where remaining cost lives and what relaxing the contract could try, so a single big-win iter doesn't hide a comparable second-round opportunity. The skill never starts the follow-up automatically — relaxing the contract requires explicit user confirmation ("consumer reads exactly these attributes, nothing else"), and getting that wrong is silent production breakage that the relaxed fingerprint cannot catch.
+
+**Cost decomposition.** Run `EXPLAIN ANALYZE` on the kept SQL once (5–10s, strongly recommended — without it the dimensions collapse to just `DB-side` vs `Ruby-side`, which usually can't disambiguate SQL shape from wire as the dominant attack):
+
+| Dimension | Source | Primary attacks |
+|---|---|---|
+| Server execution | `EXPLAIN ANALYZE` Execution Time | SQL shape, indexes, partition pruning |
+| Planning | `EXPLAIN ANALYZE` Planning Time | Prepared statements, simpler joins (rare to dominate) |
+| Network + decode | `Db-Us` − (Execution + Planning) | Column projection, payload reduction |
+| Ruby-side (mostly hydration) | `Median-Us` − `Db-Us` | Bypass Active Record (`find_by_sql`, `pluck`) |
+
+Render as ms + % of total median; the dominant row points at the next round.
+
+**Follow-up by dominant dimension:**
+
+| Dominant | Follow-up branch | Fingerprint relaxation |
+|---|---|---|
+| Network + decode | `autoresearch/<target>-projected` | Project only the columns the consumer reads — `select(...)` drops the rest |
+| Ruby-side | `autoresearch/<target>-unhydrated` | Hash only consumer-read attributes — allows `find_by_sql` / `exec_query` |
+| Server execution (SQL/index exhausted) | — separate PR (out of scope) | Use manual recipes: counter_cache, materialized view, partitioning, denormalization, read replica routing |
+
+Confirm consumer-read attributes with the user, then `git checkout -b autoresearch/<target>-<suffix>` from main and override `FINGERPRINT` in the new fixture to match the relaxation column.
+
 ### Hook teardown
 
 After the consumption decision is made (cherry-pick, squash, or discard), remove the hook so the repository returns to its pre-session state. The hook is a no-op outside `autoresearch/*` branches so leaving it installed is not actively harmful, but a stale hook from a previous session can confuse a later one — especially if `core.hooksPath` was customized or a different skill version installs a different hook later.
